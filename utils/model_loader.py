@@ -3,7 +3,7 @@ import torch
 from .utils import get_time
 
 
-def save_state(model, optimizer, config, accuracy, step=0, model_only=False, head=None):
+def save_state(model, optimizer, config, accuracy, step=0, model_only=False, head=None, epoch=0):
     save_path = config.model_path
 
     if head is None:
@@ -40,3 +40,16 @@ def save_state(model, optimizer, config, accuracy, step=0, model_only=False, hea
                 ),
             ),
         )
+
+    # Save a single checkpoint file for easy resume
+    torch.save(
+        {
+            "model": model_weights,
+            "head": head_weights,
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "step": step,
+            "accuracy": accuracy,
+        },
+        path.join(save_path, "checkpoint_latest.pth"),
+    )

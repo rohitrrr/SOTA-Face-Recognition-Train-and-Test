@@ -150,18 +150,20 @@ class TailRankingLoss(nn.Module):
 
 class HardestPositiveLoss(nn.Module):
     """
-    Hardest-positive compactness loss in Fisher-projected space.
+    Hardest-positive compactness loss using queue-based positive mining.
 
-    For each anchor, ensure its worst same-class sample exceeds a
-    minimum similarity threshold τ_p.
+    For each anchor, find the hardest (least similar) same-class sample
+    across BOTH the batch AND the queue, then penalize if below threshold τ_p.
 
-    L_pos = (1/B) · Σ_a max(0, τ_p - g(a)·g(p*(a)))
+    L_pos = (1/|V|) · Σ_{a ∈ V} max(0, τ_p - g(a)·g(p*(a)))
 
-    Note: This loss requires PK-style sampling (multiple images per
-    identity per batch) to be effective. If your sampler doesn't
-    guarantee this, many anchors will have no same-class partner
-    and will contribute zero — that's handled gracefully but reduces
-    effective batch utilization.
+    Queue mining solves the core problem: with 85K classes and batch=64,
+    same-class pairs appear in only ~2.3% of batches. The queue (16K entries,
+    ~2-3K unique classes) provides positives for far more anchors.
+
+    Gradient flows through proj_online (anchor side) only. Queue positives
+    are detached — we pull the anchor toward where its class sits in the
+    projected space, not the other way around.
 
     Args:
         tau_p: Minimum required cosine similarity for positives. Default 0.5.
@@ -171,11 +173,14 @@ class HardestPositiveLoss(nn.Module):
         super().__init__()
         self.tau_p = tau_p
 
-    def forward(self, proj_online, labels_online):
+    def forward(self, proj_online, labels_online,
+                proj_queue=None, labels_queue=None):
         """
         Args:
-            proj_online: (B, k) projected embeddings.
-            labels_online: (B,) class labels.
+            proj_online: (B, k) projected embeddings (gradient flows).
+            labels_online: (B,) class labels for online batch.
+            proj_queue: (Q, k) projected queue embeddings (no gradient). Optional.
+            labels_queue: (Q,) queue labels. Optional.
 
         Returns:
             loss: scalar hardest-positive compactness loss.
@@ -189,18 +194,35 @@ class HardestPositiveLoss(nn.Module):
                 'pos_loss': 0.0, 'n_valid_pos_anchors': 0,
                 'mean_hardest_pos_sim': 0.0, 'frac_below_tau': 0.0}
 
-        sim = proj_online @ proj_online.T
-
-        label_eq = labels_online.unsqueeze(0) == labels_online.unsqueeze(1)
+        # ─── Batch positives (same as before) ────────────────────────
+        sim_batch = proj_online @ proj_online.T  # (B, B)
+        label_eq_batch = labels_online.unsqueeze(0) == labels_online.unsqueeze(1)
         self_mask = ~torch.eye(B, dtype=torch.bool, device=device)
-        pos_mask = label_eq & self_mask
+        pos_mask_batch = label_eq_batch & self_mask
 
-        has_positive = pos_mask.any(dim=1)
+        sim_pos_batch = sim_batch.clone()
+        sim_pos_batch[~pos_mask_batch] = float('inf')
+        hardest_batch, _ = sim_pos_batch.min(dim=1)  # (B,)
+        has_batch_pos = pos_mask_batch.any(dim=1)
 
-        sim_pos = sim.clone()
-        sim_pos[~pos_mask] = float('inf')
-        hardest_pos_sim, _ = sim_pos.min(dim=1)
+        # ─── Queue positives (the key addition) ─────────────────────
+        if proj_queue is not None and labels_queue is not None and proj_queue.shape[0] > 0:
+            sim_queue = proj_online @ proj_queue.T  # (B, Q)
+            label_eq_queue = labels_online.unsqueeze(1) == labels_queue.unsqueeze(0)  # (B, Q)
 
+            sim_pos_queue = sim_queue.clone()
+            sim_pos_queue[~label_eq_queue] = float('inf')
+            hardest_queue, _ = sim_pos_queue.min(dim=1)  # (B,)
+            has_queue_pos = label_eq_queue.any(dim=1)
+
+            # Combine: take the harder (lower sim) of batch vs queue
+            hardest_pos_sim = torch.minimum(hardest_batch, hardest_queue)
+            has_positive = has_batch_pos | has_queue_pos
+        else:
+            hardest_pos_sim = hardest_batch
+            has_positive = has_batch_pos
+
+        # ─── Loss ────────────────────────────────────────────────────
         per_anchor_loss = F.relu(self.tau_p - hardest_pos_sim)
         per_anchor_loss = per_anchor_loss * has_positive.float()
 
@@ -217,6 +239,8 @@ class HardestPositiveLoss(nn.Module):
                     .float().mean().item()
                     if n_valid > 0 else 0.0),
                 'n_valid_pos_anchors': n_valid,
+                'n_batch_pos': int(has_batch_pos.sum().item()),
+                'n_queue_pos': int(has_positive.sum().item()) - int(has_batch_pos.sum().item()),
             }
 
         return loss, diag
@@ -309,8 +333,9 @@ class ScaleFRLoss(nn.Module):
         loss_tail, diag_tail = self.tail_loss(
             proj_online, labels_online, proj_queue, labels_queue)
 
-        # Hardest positive loss
-        loss_pos, diag_pos = self.pos_loss(proj_online, labels_online)
+        # Hardest positive loss (with queue-based mining)
+        loss_pos, diag_pos = self.pos_loss(
+            proj_online, labels_online, proj_queue, labels_queue)
 
         # Combined with ramp
         total = ramp * (self.lambda_tail * loss_tail +

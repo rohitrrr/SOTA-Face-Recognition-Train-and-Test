@@ -28,10 +28,14 @@ class TrainLogger(object):
                     speed_total = float('inf')
 
                 time_now = time.time()
-                time_sec = int(time_now - self.time_start)
-                time_sec_avg = time_sec / (step - self.start_step + 1)
-                eta_sec = time_sec_avg * (self.total_steps - step - 1)
-                time_for_end = eta_sec/3600
+                time_sec = time_now - self.time_start
+                steps_done = step - self.start_step
+                if steps_done > 0:
+                    time_sec_avg = time_sec / steps_done
+                    eta_sec = time_sec_avg * (self.total_steps - step)
+                else:
+                    eta_sec = 0
+                time_for_end = eta_sec / 3600
                 if self.writer is not None:
                     self.writer.add_scalar('time_for_end', time_for_end, step)
                     self.writer.add_scalar('loss', loss.avg, step)
@@ -43,3 +47,5 @@ class TrainLogger(object):
             else:
                 self.init = True
                 self.tic = time.time()
+                self.time_start = time.time()
+                self.start_step = step

@@ -7,7 +7,7 @@ from time import time
 from torch import optim, distributed
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from data import LMDBDataLoader,WebDataLoader, get_val_pair, setup_seed
+from data import LMDBDataLoader, get_val_pair, setup_seed
 from lr_scheduler import PolyScheduler
 from model import iresnet, PartialFC_V2, get_vit
 import verification
@@ -130,6 +130,21 @@ class Train:
                 last_epoch=-1
             )
 
+        self.start_epoch = 0
+        self.start_step = 1
+        if self.config.resume:
+            ckpt = torch.load(self.config.resume, map_location=f"cuda:{local_rank}", weights_only=False)
+            self.model.module.load_state_dict(ckpt["model"])
+            self.head.load_state_dict(ckpt["head"])
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            self.start_epoch = ckpt["epoch"] + 1
+            self.start_step = ckpt["step"] + 1
+            if self.config.scheduler:
+                for _ in range(ckpt["step"]):
+                    self.lr_scheduler.step()
+            if local_rank == 0:
+                logging.info(f"Resumed from epoch {ckpt['epoch']}, step {ckpt['step']}, acc {ckpt['accuracy']:.4f}")
+
         self.validation_list = []
         for val_name in config.val_list:
             if local_rank == 0:
@@ -156,8 +171,8 @@ class Train:
         self.head.train()
         loss_am = AverageMeter()
         amp = torch.cuda.amp.grad_scaler.GradScaler(growth_interval=100)
-        step = 1
-        for epoch in range(self.config.epochs):
+        step = self.start_step
+        for epoch in range(self.start_epoch, self.config.epochs):
             if isinstance(self.train_loader, DataLoader):
                 self.train_loader.sampler.set_epoch(epoch)
             if not self.config.scheduler and epoch + 1 in self.config.reduce_lr:
@@ -194,16 +209,19 @@ class Train:
 
                 step += 1
 
-            self.save_model(step)
+            self.save_model(step, epoch)
 
-    def save_model(self, step):
+    def save_model(self, step, epoch):
         if local_rank == 0:
-            val_acc, _ = self.evaluate(step)
-            if val_acc > self.best_acc:
-                self.best_acc = val_acc
-                self.best_step = step
-            save_state(self.model, self.optimizer, self.config, val_acc, step, head=self.head)
-            logging.info(f"Best accuracy: {self.best_acc:.5f} at step {self.best_step}")
+            if self.config.val_list:
+                val_acc, _ = self.evaluate(step)
+                if val_acc > self.best_acc:
+                    self.best_acc = val_acc
+                    self.best_step = step
+                logging.info(f"Best accuracy: {self.best_acc:.5f} at step {self.best_step}")
+            else:
+                val_acc = 0.0
+            save_state(self.model, self.optimizer, self.config, val_acc, step, head=self.head, epoch=epoch)
 
     def reduce_lr(self):
         for params in self.optimizer.param_groups:
@@ -273,9 +291,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--config_file", "-config", help="path of config file.", default="./configs/base.py", type=str)
     parser.add_argument("--device", default='0', type=str, help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument("--resume", default=None, type=str, help="path to checkpoint_latest.pth to resume from")
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device
     config = get_config(args.config_file)
+    if args.resume:
+        config.resume = args.resume
     setup_seed(seed=42, cuda_deterministic=False)
     train = Train(config)
     train.run()

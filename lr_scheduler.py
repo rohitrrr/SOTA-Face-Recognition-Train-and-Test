@@ -8,7 +8,7 @@ class PolyScheduler(_LRScheduler):
         self.max_steps: int = max_steps
         self.warmup_steps: int = warmup_steps
         self.power = 2
-        super(PolyScheduler, self).__init__(optimizer, -1, False)
+        super(PolyScheduler, self).__init__(optimizer, last_epoch=-1)
         self.last_epoch = last_epoch
 
     def get_warmup_lr(self):

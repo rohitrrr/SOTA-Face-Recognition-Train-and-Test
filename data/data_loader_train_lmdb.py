@@ -33,6 +33,10 @@ class LMDB(Dataset):
                 self.length = msgpack.loads(txn.get(b"__len__"))
                 self.keys = msgpack.loads(txn.get(b"__keys__"))
                 self.classnum = msgpack.loads(txn.get(b"__classnum__"))
+            
+            # Close the env so it doesn't get shared heavily across worker forks which causes deadlocks
+            self.env.close()
+            self.env = None
 
         elif self.ext == "txt":
             image_names = pd.read_csv(db_path, header=None)
@@ -68,6 +72,15 @@ class LMDB(Dataset):
             index = self.mask[index]
 
         if self.ext == "lmdb":
+            if getattr(self, 'env', None) is None:
+                self.env = lmdb.open(
+                    self.db_path,
+                    subdir=path.isdir(self.db_path),
+                    readonly=True,
+                    lock=False,
+                    readahead=False,
+                    meminit=False,
+                )
             env = self.env
             with env.begin(write=False) as txn:
                 byteflow = txn.get(self.keys[index])

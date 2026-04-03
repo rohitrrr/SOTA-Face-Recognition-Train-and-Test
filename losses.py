@@ -176,6 +176,7 @@ class AdaFace(nn.Module):
         self.register_buffer('batch_std', torch.ones(1)*100)
 
     def forward(self, logits: torch.Tensor, labels: torch.Tensor, **kwargs):
+        embeddings = kwargs["embeddings"]
         index = torch.where(labels != -1)[0]
         cosine = logits.clamp(-1+self.eps, 1-self.eps)
         target_logit = cosine[index, labels[index].view(-1)]

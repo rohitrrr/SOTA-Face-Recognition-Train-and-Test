@@ -369,17 +369,6 @@ class TrainScaleFR:
                     not self.memory_bank_initialized):
                 self._init_memory_bank()
 
-            # ─── Check if we should activate SCaLE-FR this epoch ──────
-            if (epoch >= self.sf.activate_epoch and
-                    not self.scale_fr_activated and
-                    self.fisher.initialized):
-                self.scale_loss.activate()
-                self.scale_fr_activated = True
-                if rank == 0:
-                    logging.info(
-                        f"[SCaLE-FR] Activated at epoch {epoch}, "
-                        f"step {self.global_step}")
-
             for idx, data in enumerate(self.train_loader):
                 imgs, labels = data
                 self.global_step += 1
@@ -417,6 +406,17 @@ class TrainScaleFR:
                                         self.writer.add_scalar(
                                             f"fisher/{k}", v,
                                             self.global_step)
+
+                # ═══ SCaLE-FR: activate when ready (checked every step) ═
+                if (epoch >= self.sf.activate_epoch and
+                        not self.scale_fr_activated and
+                        self.fisher.initialized):
+                    self.scale_loss.activate()
+                    self.scale_fr_activated = True
+                    if rank == 0:
+                        logging.info(
+                            f"[SCaLE-FR] Activated at epoch {epoch}, "
+                            f"step {self.global_step}")
 
                 # ═══ SCaLE-FR: compute tail + positive losses ═════════
                 loss_scale = torch.tensor(0.0, device=imgs.device)
@@ -615,12 +615,13 @@ class TrainScaleFR:
                 batch_or = torch.tensor(
                     samples[idx: idx + batch_flip.shape[0]])
 
+                actual = batch_or.shape[0]
                 if self.config.add_flip:
-                    embeddings[idx:idx + self.config.batch_size] = \
+                    embeddings[idx:idx + actual] = \
                         self.backbone(batch_or.to(local_rank)).cpu() + \
                         self.backbone(batch_flip.to(local_rank)).cpu()
                 else:
-                    embeddings[idx:idx + self.config.batch_size] = \
+                    embeddings[idx:idx + actual] = \
                         self.backbone(batch_or.to(local_rank)).cpu()
 
         normalized = np.divide(
@@ -642,6 +643,7 @@ class TrainScaleFR:
                             embedding_length + idx + self.config.batch_size])
                 batch_or = torch.tensor(
                     samples[idx: idx + batch_flip.shape[0]])
+                actual = batch_or.shape[0]
 
                 # Get raw embeddings
                 if self.config.add_flip:
@@ -653,7 +655,7 @@ class TrainScaleFR:
                 # L2-normalize then project
                 raw_norm = F.normalize(raw.float(), dim=1)
                 proj = self.fisher.project(raw_norm)
-                embeddings[idx:idx + self.config.batch_size] = proj.cpu().numpy()
+                embeddings[idx:idx + actual] = proj.cpu().numpy()
 
         normalized = np.divide(
             embeddings, np.linalg.norm(embeddings, 2, 1, True))

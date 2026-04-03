@@ -123,15 +123,15 @@ def align_face(img_bgr, landmarks_5pt, output_size=112):
 # ---------------------------------------------------------------------------
 def _process_one(args):
     """
-    args = (img_path, pts5)
+    args = (img_path, pts5, output_size)
     Returns (jpg_bytes, success_bool, error_msg)
     """
-    img_path, pts5 = args
+    img_path, pts5, output_size = args
     try:
         img = cv2.imread(img_path)
         if img is None:
             return None, False, f"Cannot read: {img_path}"
-        rgb = align_face(img, pts5)
+        rgb = align_face(img, pts5, output_size)
         pil = Image.fromarray(rgb)
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=95)
@@ -255,7 +255,7 @@ def write_lmdb(samples, n_classes, lmdb_path, workers, output_size, map_size_gb)
     n_fail = 0
 
     # Build args list for pool
-    pool_args = [(img_path, pts5) for img_path, pts5, _ in samples]
+    pool_args = [(img_path, pts5, output_size) for img_path, pts5, _ in samples]
     labels = [label for _, _, label in samples]
 
     BATCH = 1000  # write to LMDB in batches to avoid large transactions
